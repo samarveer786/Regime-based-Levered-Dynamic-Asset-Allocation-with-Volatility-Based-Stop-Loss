@@ -28,13 +28,14 @@ R_MIN = -0.10   # -10%
 R_MAX =  0.04   # +4%
 W_MIN =  0.20   # 20% staking at worst
 W_MAX =  0.70   # 70% max staking
-Eth_return_duration=30
+Eth_return_duration_long=30
+Eth_return_duration_short=7
 stble_pt_apy=0.06
 stble_pt_brw_apy=0.04
 stable_lev=3
 
 
-df=pd.read_csv('/Users/samarveer/Downloads/eth_price_2020_2025_1.csv')
+df=pd.read_csv('/Users/samarveer/Downloads/eth_price_2024_2025.csv')
 df['Date']=pd.to_datetime(df['Date']).dt.date
 
 # Monte Carlo sims for stk_apy and brw_apy
@@ -59,14 +60,17 @@ df['EMA_50']=df['ETH Price'].ewm(span=50, adjust=False).mean()
 df['Trend']=df['EMA_8']>df['EMA_20']
 df['Major trend']=df['ETH Price']>df['EMA_50']
 
-df['eth_ret_30d'] = df['ETH Price'] / df['ETH Price'].shift(Eth_return_duration) - 1
-r = df['eth_ret_30d']
+df['eth_ret_30d'] = df['ETH Price'] / df['ETH Price'].shift(Eth_return_duration_long) - 1
+r_long = df['eth_ret_30d']
+df['eth_ret_7d'] = df['ETH Price'] / df['ETH Price'].shift(Eth_return_duration_short) - 1
+r_short = df['eth_ret_7d']
+
 
 df['ret_abs'] = df['Daily_chng'].abs()
 df['vol_7d'] = df['ret_abs'].rolling(7).std() * np.sqrt(365)   # annualized realized vol
 
 # Clip R_7d into [-10%, +4%] range
-r_clipped = r.clip(lower=R_MIN, upper=R_MAX)
+r_clipped = r_long.clip(lower=R_MIN, upper=R_MAX)
 
 # Linear mapping:
 # w_staking = W_MIN + ((R - R_MIN) / (R_MAX - R_MIN)) * (W_MAX - W_MIN)
@@ -74,9 +78,20 @@ df['w_staking'] = W_MIN + ((r_clipped - R_MIN) / (R_MAX - R_MIN)) * (W_MAX - W_M
 
 # Safety clamp (should already be in [0.2, 0.7], but explicit is nice)
 df['w_staking'] = df['w_staking'].clip(lower=W_MIN, upper=W_MAX)
-df.loc[(df['vol_7d'] > 0.8) & (df['vol_7d'] <= 1.0), 'w_staking'] = 0.10     # severe panic
-df.loc[df['vol_7d'] > 1, 'w_staking'] = 0     # high volatility
-df['w_staking_signal'] = df['w_staking'].shift(1).fillna(W_MIN)
+
+short_neg = -0.03
+short_pos = 0.03
+r_short_clip = r_short.clip(lower=short_neg, upper=short_pos)
+# Map to [0.5 , 1.2] risk multiplier
+df['m_short'] = 0.5 + ((r_short_clip - short_neg) / (short_pos - short_neg)) * (1.2 - 0.5)
+df['m_short'] = df['m_short'].clip(lower=0.5, upper=1.2)
+
+df['w_staking_raw'] = df['w_staking'] * df['m_short']
+df['w_staking_raw'] = df['w_staking_raw'].clip(lower=0, upper=W_MAX)
+
+df.loc[(df['vol_7d'] > 0.8) & (df['vol_7d'] <= 1.0), 'w_staking_raw'] = 0.10     # severe panic
+df.loc[df['vol_7d'] > 1, 'w_staking_raw'] = 0     # high volatility
+df['w_staking_signal'] = df['w_staking_raw'].shift(1).fillna(W_MIN)
 
 
 # === Step 3 – Liquid and stable-PT weights ===
@@ -105,8 +120,7 @@ df['ret_liquid_asset'] = 0.0
 df['ret_alloc_unlev'] = (
     df['w_staking_signal']    * df['ret_staking_unlev'] +
     df['w_stable_PT_signal']  * df['ret_stable_PT_unlev'] +
-    df['w_liquid']     * df['ret_liquid_asset']
-)
+    df['w_liquid']     * df['ret_liquid_asset'])
 
 
 
@@ -362,11 +376,9 @@ calmar_ass=calmar(df['val_alloc_lev'])
 df['stk_apy']   # annual %
 df['brw_apy']   # annual %
 df['dyn_lev_signal'] # daily leverage signal
-df['net_apy_daily'] = (
-    df['dyn_lev_signal'] * (df['stk_apy'] / 365)
-    - (df['dyn_lev_signal'] - 1) * (df['brw_apy'] / 365)
-)
-df['cum_net_apy'] = (1 + df['net_apy_daily']).cumprod()
+df['net_apy_daily'] = (df['dyn_lev_signal'] * df['stk_apy'] - (df['dyn_lev_signal'] - 1) * df['brw_apy']) / 365
+
+df['cum_net_apy'] = (1+df['net_apy_daily']).cumprod()
 initial_capital = 1000
 df['val_from_net_apy'] = initial_capital * df['cum_net_apy']
 
@@ -376,7 +388,7 @@ print("---------------------------------------------------")
 print(" SHARPE RATIOS")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                                {sharpe_bh:.4f}")
-##print(f"Fixed 2x:                                  {sharpe_fixed:.4f}")
+print(f"Fixed 2x:                                  {sharpe_fixed:.4f}")
 print(f"Dynamic Model:                             {sharpe_dyn:.4f}")
 print(f"Levered Asset allocation Dynamic Model:    {sharpe_ass:.4f}")
 
@@ -384,7 +396,7 @@ print("---------------------------------------------------")
 print(" SORTINO RATIOS")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                                  {sortino_bh:.4f}")
-##print(f"Fixed 2x:                                    {sortino_fixed:.4f}")
+print(f"Fixed 2x:                                    {sortino_fixed:.4f}")
 print(f"Dynamic LTV:                                 {sortino_dyn:.4f}")
 print(f"Levered Asset allocation Dynamic Model:      {sortino_ass:.4f}")
 
@@ -392,7 +404,7 @@ print("---------------------------------------------------")
 print(" Drawdown")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                                  {max_dd_bh:.4f}")
-##print(f"Fixed 2x:                                    {max_dd_fixed:.4f}")
+print(f"Fixed 2x:                                    {max_dd_fixed:.4f}")
 print(f"Dynamic LTV:                                 {max_dd_dyn:.4f}")
 print(f"Levered Asset allocation Dynamic Model:      {max_dd_ass:.4f}")
 
@@ -400,7 +412,7 @@ print("---------------------------------------------------")
 print(" CALMAR RATIOS")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                                  {calmar_bh:.4f}")
-##print(f"Fixed 2x:                                    {calmar_fixed:.4f}")
+print(f"Fixed 2x:                                    {calmar_fixed:.4f}")
 print(f"Dynamic LTV:                                 {calmar_dyn:.4f}")
 print(f"Levered Asset allocation Dynamic Model:      {calmar_ass:.4f}")
 
@@ -408,7 +420,7 @@ print("---------------------------------------------------")
 print(" CAGR")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                                  {cagr_bh:.4f}")
-##print(f"Fixed 2x:                                    {cagr_fixed:.4f}")
+print(f"Fixed 2x:                                    {cagr_fixed:.4f}")
 print(f"Dynamic LTV:                                 {cagr_dyn:.4f}")
 print(f"Levered Asset allocation Dynamic Model:      {cagr_ass:.4f}")
 
@@ -417,7 +429,7 @@ print("\n---------------------------------------------------")
 print(" FINAL VALUES")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                               ${df['val_bh'].iloc[-1]:.2f}")
-##print(f"Fixed 2x:                                 ${df['val_fixed'].iloc[-1]:.2f}")
+print(f"Fixed 2x:                                 ${df['val_fixed'].iloc[-1]:.2f}")
 print(f"Dynamic LTV:                              ${df['val_dyn_preliq'].iloc[-1]:.2f}")
 print(f"Levered Asset allocation Dynamic Model:   ${df['val_alloc_lev'].iloc[-1]:.2f}")
 
@@ -425,7 +437,7 @@ print("\n---------------------------------------------------")
 print(" FINAL ROI")
 print("---------------------------------------------------")
 print(f"Buy & Hold:                               {(df['val_bh'].iloc[-1]-1000)/1000:.2f}")
-##print(f"Fixed 2x:                                 {(df['val_fixed'].iloc[-1]-1000)/1000:.2f}")
+print(f"Fixed 2x:                                 {(df['val_fixed'].iloc[-1]-1000)/1000:.2f}")
 print(f"Dynamic LTV:                              {(df['val_dyn_preliq'].iloc[-1]-1000)/1000:.2f}")
 print(f"Levered Asset allocation Dynamic Model:   {(df['val_alloc_lev'].iloc[-1]-1000)/1000:.2f}")
 
@@ -460,7 +472,7 @@ print_apy_stats(df)
 
 plt.figure(figsize=(12,6))
 plt.plot(df['Date'], df['val_bh'], label="Buy & Hold", linewidth=2)
-##plt.plot(df['Date'], df['val_fixed'], label="Fixed 2x", linewidth=2)
+plt.plot(df['Date'], df['val_fixed'], label="Fixed 2x", linewidth=2)
 plt.plot(df['Date'], df['val_dyn_preliq'], label="Dynamic LTV Model", linewidth=2)
 plt.plot(df['Date'], df['val_alloc_lev'], label="Levered Asset allocation Dynamic Model", linewidth=2)
 plt.grid(alpha=0.3)
@@ -479,11 +491,3 @@ plt.title("Net APY Compounding Curve")
 plt.xlabel("Date")
 plt.ylabel("Portfolio Value (USD)")
 plt.show()
-
-
-# In[61]:
-
-
-liq_days = df[df['liq_status_ass_pre'] == 'Yes'][['Date', 'Daily_chng', 'HF_fixed_before']]
-liq_days
-
