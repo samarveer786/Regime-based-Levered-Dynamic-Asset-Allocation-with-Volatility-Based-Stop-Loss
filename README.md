@@ -1,77 +1,110 @@
-# Levered-Dynamic-Asset-Allocation-with-Volatility-Based-Stop-Loss
+# Levered Dynamic Asset Allocation with Dual Momentum & Volatility Risk Control
 
-Python implementation of an institutional-grade **DeFi strategy** that combines:
+This repository implements a **systematic ETH staking vault strategy** that combines:
 
-- Trend-based **dynamic leverage** on ETH–stETH loops,
-- Systematic **asset allocation** between ETH staking and PT stablecoins,
-- **Volatility-driven de-risking** and health-factor monitoring,
+- **Dual-horizon momentum–based asset allocation**
+- **Trend-filtered dynamic leverage**
+- **Volatility-based crash protection**
+- **Stochastic DeFi yield and borrow modeling**
 
-with the goal of outperforming Buy & Hold ETH on a **risk-adjusted** basis.
-
----
-
-## 1. Project Overview
-
-This repository contains:
-
-- A full **backtest engine** for ETH from Jan-2020 to 7 Oct 2025 (daily data).
-- Implementation of:
-  - Buy & Hold ETH benchmark
-  - Fixed 2× ETH loop
-  - Dynamic LTV model
-  - **Levered Dynamic Asset Allocation model** (main strategy)
-- Detailed performance metrics:
-  - Sharpe, Sortino, Calmar, CAGR
-  - Max drawdown
-  - Final equity and ROI
-- APY simulation stats for the loop (staking vs borrow APYs).
+The objective is to **maximize long-term risk-adjusted returns while strictly controlling drawdowns, liquidation risk, and tail events**.
 
 ---
 
-## 2. Strategy Architecture
+## 🔧 Core Strategy Architecture
 
-### 2.1 Dynamic Leverage Engine
+The strategy is built from four independent but interacting engines:
 
-Trend detection using EMAs:
+---
 
-- `EMA_8`, `EMA_20`, `EMA_50` computed on daily ETH price.
-- Leverage rules (`get_dyn_lev`):
+### 1. Dynamic Leverage Engine (Trend-Based)
 
-  - Strong uptrend (`Price > EMA_50` and `EMA_8 > EMA_20`) → **2×**
-  - Mild uptrend (`Price > EMA_50`) → **1.5×**
-  - Early trend (`EMA_8 > EMA_20`) → **1×**
-  - Else → **0×** (no leverage)
+Leverage is applied to ETH staking based on multi-timeframe trend filters using:
 
-- Stop-loss overlay:
-  - `Price < 0.95 * EMA_50` → **force 0×**
-  - `Price < EMA_50` → cap leverage at **0.5×**
+- **EMA 8**
+- **EMA 20**
+- **EMA 50**
 
-- **Execution:**  
-  `dyn_lev_signal = dyn_lev.shift(7)` → leverage is **rebalanced weekly** based on the previous week’s trend.
+**Leverage Regimes:**
 
-### 2.2 Dynamic Asset Allocation Engine
+| Market Regime | Condition | Leverage |
+|---------------|----------|----------|
+| Strong Uptrend | Price > EMA50 & EMA8 > EMA20 | 2.0× |
+| Mild Uptrend | Price > EMA50 | 1.5× |
+| Early Trend | EMA8 > EMA20 | 1.0× |
+| Bearish | Otherwise | 0× |
 
-Capital split:
+**Hard Stop-Loss Overlay:**
+- If **Price < EMA50 → Max leverage capped at 0.5×**
+- If **Price < 0.95 × EMA50 → Leverage forced to 0×**
 
-- **10% permanent liquidity buffer (`w_liquid`)**.
-- **90% “risk capital”**:
+This ensures leverage is only deployed during favorable market regimes and is aggressively reduced on trend failure.
 
-  - ETH staking bucket (LST)
-  - PT stablecoin bucket
+---
 
-Staking weight is a function of 30-day ETH performance:
+### 2. Dual Momentum Asset Allocation Engine
 
-1. 30-day return: `eth_ret_30d`.
-2. Clip to `[-10%, +4%]`.
-3. Linearly map into staking band `[20%, 70%]`.
-4. Apply 7-day annualized volatility overlay:
-   - `0.80 < vol_7d ≤ 1.00` → set staking to **10%**.
-   - `vol_7d > 1.00` → set staking to **0%**, i.e. 90% into PT stablecoins.
-5. Apply **1-day execution lag**: `w_staking_signal = w_staking.shift(1)`.
+Capital is split into:
 
-Stable PT allocation is simply:
+- **10% Permanent Liquidity Reserve**
+- **90% Dynamic Risk Capital**
 
-```python
-w_liquid = 0.10
-w_stable_PT_signal = 0.90 - w_staking_signal
-w_total_alloc = w_liquid + w_staking_signal + w_stable_PT_signal
+The 90% risk bucket is allocated dynamically between:
+
+- **ETH staking**
+- **Short-duration stable PT tokens**
+
+#### Step 1 – Structural Allocation (30-Day Momentum)
+The **30-day ETH return** defines the long-term risk budget.  
+Returns are clipped to a predefined range and mapped to a **base ETH staking weight between 20% and 70%**.
+
+#### Step 2 – Tactical Acceleration (7-Day Momentum)
+The **7-day ETH return** scales the base allocation:
+- Positive short-term momentum increases exposure
+- Weak momentum reduces exposure early
+
+#### Step 3 – Capital Routing
+The final ETH staking weight is applied to the 90% risk bucket.  
+Any unused portion is allocated to **short-duration stable PT tokens** for capital preservation and yield stability.
+
+---
+
+### 3. Volatility-Based Crash Regime Filter
+
+A dedicated crash-protection layer uses **7-day annualized realized ETH volatility**:
+
+| Volatility Regime | Action |
+|-------------------|--------|
+| 80% – 100% | ETH staking capped at 10% |
+| > 100% | ETH staking forced to 0% |
+
+This layer acts as a **pure risk-off circuit breaker**, independent of trend or momentum, protecting against liquidation cascades and volatility shocks.
+
+---
+
+### 4. DeFi Yield & Leverage Modeling
+
+- **ETH–stETH looping** is modeled using **stochastic staking and borrowing APYs** drawn from normal distributions to reflect realistic funding dynamics.
+- **Stable PT tokens** are modeled as a **3× leveraged fixed carry strategy**.
+- Net yield is computed as:
+
+\[
+\text{Net APY} =
+L \cdot \text{Staking APY} - (L - 1)\cdot \text{Borrow APY}
+\]
+
+This separates **pure yield carry** from **price risk** and prevents the system from relying on unsustainable funding conditions.
+
+---
+
+## 📊 Key Risk Controls
+
+- Dual momentum prevents late-cycle overexposure
+- EMA regime filters prevent leverage in downtrends
+- Volatility circuit breaker prevents crash liquidation
+- Yield-leg decoupling prevents negative carry bleed
+- Signal shifting ensures **no look-ahead bias**
+
+---
+
+
